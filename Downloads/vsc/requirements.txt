@@ -1,4 +1,0 @@
-tweepy
-requests
-python-dotenv
-gunicorn

@@ -5,6 +5,8 @@ import os
 import json
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
+from fastapi import FastAPI
+import uvicorn
 
 # Load environment variables
 load_dotenv()
@@ -38,6 +40,21 @@ auth = tweepy.OAuth1UserHandler(
 )
 api = tweepy.API(auth)
 
+# Web server setup
+app = FastAPI()
+
+@app.get("/")
+def home():
+    return {"status": "Running", "message": "Twitter/Twitch Bot is Active!"}
+
+@app.get("/status")
+def bot_status():
+    return {
+        "twitter_users": ["StableRonaldo", "LacyHimself"],
+        "twitch_users": ["stableronaldo", "Lacy"],
+        "last_checked": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    }
+
 def get_twitch_token():
     response = requests.post(TWITCH_AUTH_URL, params={
         'client_id': TWITCH_CLIENT_ID,
@@ -47,11 +64,6 @@ def get_twitch_token():
     response.raise_for_status()
     return response.json()["access_token"]
 
-async def refresh_twitch_token():
-    global TWITCH_TOKEN
-    TWITCH_TOKEN = get_twitch_token()
-    print("🔑 Twitch Token Refreshed!")
-
 TWITCH_TOKEN = get_twitch_token()
 twitch_headers = {
     'Client-ID': TWITCH_CLIENT_ID,
@@ -59,91 +71,34 @@ twitch_headers = {
 }
 
 async def auto_refresh_token():
-    """ Refresh Twitch token every 55 minutes """
     while True:
         await asyncio.sleep(3300)
-        await refresh_twitch_token()
+        global TWITCH_TOKEN
+        TWITCH_TOKEN = get_twitch_token()
+        print("🔑 Twitch Token Refreshed!")
 
 async def check_live_status(usernames):
     try:
         response = requests.get(f"{TWITCH_API_BASE}streams", headers=twitch_headers, params={"user_login": usernames})
         response.raise_for_status()
         streams = response.json().get("data", [])
-        
+
         for stream in streams:
             message = f"🚀 {stream['user_name']} is now LIVE! Playing {stream['game_name']} \nWatch: https://twitch.tv/{stream['user_name']}"
             api.update_status(message)
             print("Tweeted:", message)
-
     except requests.exceptions.RequestException as e:
         print(f"[{datetime.now()}] Twitch Error: {e}")
-        await refresh_twitch_token()
 
-async def check_twitter_updates(usernames):
-    one_hour_ago = datetime.utcnow() - timedelta(hours=1)
-    
-    for user in usernames:
-        try:
-            user_data = api.get_user(screen_name=user)
-            if not user_data:
-                print(f"[{datetime.now()}] User '{user}' not found.")
-                continue
-
-            tweets = api.user_timeline(screen_name=user, count=1, tweet_mode="extended")
-            
-            if tweets:
-                tweet = tweets[0]
-                tweet_id = str(tweet.id)
-                tweet_time = tweet.created_at
-
-                if tweet_id not in retweeted_cache and tweet_time > one_hour_ago:
-                    api.retweet(tweet_id)
-                    retweeted_cache.add(tweet_id)
-                    await save_cache()
-                    print(f"✅ Retweeted: {tweet.full_text}")
-                    await asyncio.sleep(5)
-                else:
-                    print(f"❌ Skipped Old Tweet: {tweet.full_text}")
-
-            await asyncio.sleep(10)  # Wait between users (Prevent 429)
-
-        except tweepy.TweepyException as e:
-            await handle_rate_limit(e)
-        except Exception as e:
-            print(f"[{datetime.now()}] Unexpected Error: {e}")
-
-async def handle_rate_limit(e):
-    """ Handle Twitter API rate limits with exponential backoff """
-    if hasattr(e, "response") and e.response is not None and e.response.status_code == 429:
-        reset_time = int(e.response.headers["x-rate-limit-reset"])
-        wait_time = max(0, (datetime.utcfromtimestamp(reset_time) - datetime.utcnow()).seconds)
-        print(f"🚫 Rate limit exceeded. Sleeping for {wait_time} seconds...")
-        await asyncio.sleep(wait_time)
-
-async def save_cache():
-    with open(CACHE_FILE, "w") as f:
-        json.dump(list(retweeted_cache), f)
-
-async def main():
+async def bot_loop():
     clan_twitch_users = ["stableronaldo", "Lacy"]
-    clan_twitter_users = ["StableRonaldo", "LacyHimself"]
-    cooldown = 300
-
-    asyncio.create_task(auto_refresh_token())  # Auto-refresh Twitch token
-
     while True:
-        try:
-            await check_live_status(clan_twitch_users)
-            await check_twitter_updates(clan_twitter_users)
-            print(f"✅ [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Checked all clan members. Waiting {cooldown // 60} minutes...")
-            await asyncio.sleep(cooldown)
-        except tweepy.TweepyException as e:
-            await handle_rate_limit(e)
-        except Exception as e:
-            print(f"[{datetime.now()}] Bot Error: {e}")
-            cooldown += 300
-            await asyncio.sleep(cooldown)
+        await check_live_status(clan_twitch_users)
+        print(f"✅ Checked Twitch Live Status at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
+        await asyncio.sleep(300)  # Run every 5 minutes
 
 if __name__ == "__main__":
-    print("🚀 Starting Bot...")
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    loop.create_task(auto_refresh_token())  # Auto-refresh Twitch token
+    loop.create_task(bot_loop())  # Start bot loop
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))  # Start FastAPI
